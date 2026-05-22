@@ -11,7 +11,7 @@ This repository contains the **Proof of Concept (PoC) implementation** for the B
 > Institution: DHBW Heidenheim  
 > Submission: May 2026
 
-## 📋 Overview
+## Overview
 
 This project implements and compares two pipeline paradigms for data engineering in Databricks:
 
@@ -26,11 +26,7 @@ Both pipelines implement the **Medallion Architecture** (Bronze → Silver → G
 
 ---
 
-## 📁 Repository Structure
-
----
-
-## 🏗️ Architecture
+## Architecture
 
 ### Medallion Architecture Layers
 
@@ -81,7 +77,7 @@ Both pipelines implement the following three-tier architecture using **PySpark**
 
 ---
 
-## 🚀 Setup Instructions
+## Setup Instructions
 
 ### Prerequisites
 
@@ -195,7 +191,7 @@ Run this notebook to generate comparison tables and visualizations for Dimension
 
 ---
 
-## 🔧 Technology Stack
+## Technology Stack
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
@@ -211,7 +207,7 @@ Run this notebook to generate comparison tables and visualizations for Dimension
 | **Analysis Tools** | Radon, Lizard, pandas, matplotlib | 6.0.1, 1.17.10 |
 
 ---
-## 📝 Citation
+## Citation
 
 If you use or reference this work, please cite:
 
@@ -229,7 +225,7 @@ If you use or reference this work, please cite:
 
 ---
 
-## 📄 License
+## License
 
 This project is provided for **academic review and research purposes only**.
 
@@ -241,7 +237,7 @@ See [LICENSE](LICENSE) file for full terms.
 
 ---
 
-## 👤 Author
+## Author
 
 **Franziska Klement**  
 DHBW Heidenheim – Wirtschaftsinformatik
@@ -250,7 +246,7 @@ Location: Heidenheim, Germany
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **DHBW Heidenheim**: For academic supervision and resources
 - **Databricks**: For providing the platform, Delta Live Tables framework, and TPC-DS sample datasets
