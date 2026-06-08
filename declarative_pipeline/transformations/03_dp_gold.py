@@ -1,15 +1,21 @@
 """
 Declarative Gold Layer
 
+Builds business-ready gold dimensions and facts on top of the silver
+layer by adding derived attributes, analytical measures, and aggregated
+marts such as monthly top-selling items.
 """
+
 
 import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 
+
 @dlt.table(name="gold_dim_date", comment="Gold dimension: business-ready calendar attributes")
 def gold_dim_date():
+    # Business-friendly calendar dimension derived from the validated silver date model.
     return (
         dlt.read("silver_date_dim")
         .select(
@@ -46,8 +52,10 @@ def gold_dim_date():
     )
 
 
+
 @dlt.table(name="gold_dim_item", comment="Gold dimension: item attributes for product and pricing analysis")
 def gold_dim_item():
+    # Item dimension with derived price bands and margin percentage for analysis.
     return (
         dlt.read("silver_item")
         .select(
@@ -85,8 +93,10 @@ def gold_dim_item():
     )
 
 
+
 @dlt.table(name="gold_dim_store", comment="Gold dimension: store attributes for regional and organizational analysis")
 def gold_dim_store():
+    # Store dimension enriched with size banding and pre-composed address fields.
     return (
         dlt.read("silver_store")
         .select(
@@ -132,8 +142,10 @@ def gold_dim_store():
     )
 
 
+
 @dlt.table(name="gold_dim_customer", comment="Gold dimension: customer attributes for segmentation and customer analytics")
 def gold_dim_customer():
+    # Customer dimension with age and cohort banding derived from birth year.
     current_year = F.year(F.current_date())
     age = F.when(F.col("c_birth_year").isNull(), F.lit(None)).otherwise(current_year - F.col("c_birth_year"))
     return (
@@ -172,8 +184,10 @@ def gold_dim_customer():
     )
 
 
+
 @dlt.table(name="gold_fact_store_sales", comment="Gold fact: central store sales fact table with analytical measures")
 def gold_fact_store_sales():
+    # Analytical store sales fact with derived discount, margin and revenue-per-unit metrics.
     discount_ratio = (F.col("ss_list_price") - F.col("ss_sales_price")) / F.when(F.col("ss_list_price") == 0, None).otherwise(F.col("ss_list_price"))
     return (
         dlt.read("silver_store_sales")
@@ -216,8 +230,10 @@ def gold_fact_store_sales():
     )
 
 
+
 @dlt.table(name="gold_top_items_month", comment="Gold aggregation: monthly top-selling items by revenue")
 def gold_top_items_month():
+    # Aggregated mart: top 10 items per month by revenue, with tie-breaker on quantity.
     ranked = (
         dlt.read("gold_fact_store_sales").alias("f")
         .join(dlt.read("gold_dim_date").alias("d"), F.col("f.sold_date_key") == F.col("d.date_key"), "inner")

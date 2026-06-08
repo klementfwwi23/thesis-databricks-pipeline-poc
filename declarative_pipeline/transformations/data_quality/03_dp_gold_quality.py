@@ -1,18 +1,28 @@
 """
 Declarative Gold Qualtity Layer
 
+Detects business-facing DQ issues and table-level metrics on materialized
+gold models and joins them with dq_rule_catalog metadata to provide a
+rule-aware observability view for curated data.
 """
+
 
 import dlt
 from pyspark.sql import functions as F
 
 
+
 def gold_catalog_rule(rule_id: str):
+    # Reads the metadata for exactly one gold-layer rule from the unified rule catalog.
     return dlt.read("dq_rule_catalog").where(F.col("rule_id") == rule_id)
+
 
 
 @dlt.view(name="dq_gold_dp_issues", comment="Declarative gold DQ issues observed on materialized gold models using unified dq_rule_catalog metadata")
 def dq_gold_dp_issues():
+    # Observed residual issue view for gold models.
+    # Each block filters one gold object for rows that still violate a business-facing rule
+    # and enriches the resulting rows with the corresponding catalog metadata.
     i1 = gold_catalog_rule("DP_GOLD_001").crossJoin(
         dlt.read("gold_dim_item")
         .where((F.col("current_price") < 0) | (F.col("wholesale_cost") < 0))
@@ -73,12 +83,17 @@ def dq_gold_dp_issues():
             F.when(F.col("year").isNull(), F.lit("NULL_YEAR")).when(F.col("month").isNull(), F.lit("NULL_MONTH")).when(F.col("item_key").isNull(), F.lit("NULL_ITEM_KEY")).otherwise(F.lit("UNKNOWN")).alias("issue_reason")
         )
     )
+    # Combines all gold-layer issue frames into one standardized issue dataset.
     result = i1.unionByName(i2).unionByName(i3).unionByName(i4).unionByName(i5).unionByName(i6)
     return result.select("observed_at", "paradigm", "object_name", "rule_id", "rule_group", "key_1", "key_2", "key_3", "key_4", "issue_reason")
 
 
+
 @dlt.view(name="dq_gold_dp_metrics", comment="Declarative gold DQ observability metrics aligned with unified dq_rule_catalog metadata")
 def dq_gold_dp_metrics():
+    # Builds table-level observability metrics for each gold object.
+    # The metrics summarize row volume, issue counts, negative values,
+    # and missing business keys for curated gold models.
     metrics = [
         dlt.read("gold_dim_date").agg(F.count(F.lit(1)).alias("row_count"), F.sum(F.when(F.col("date_key").isNull() | F.col("calendar_date").isNull(), 1).otherwise(0)).alias("issue_count")).withColumn("negative_value_count", F.lit(0)).withColumn("null_business_key_count", F.col("issue_count")).withColumn("object_name", F.lit("gold_dim_date")).withColumn("object_type", F.lit("MATERIALIZED_VIEW")).withColumn("source_layer", F.lit("mv_from_silver")),
         dlt.read("gold_dim_item").agg(F.count(F.lit(1)).alias("row_count"), F.sum(F.when((F.col("current_price") < 0) | (F.col("wholesale_cost") < 0), 1).otherwise(0)).alias("issue_count")).withColumn("negative_value_count", F.col("issue_count")).withColumn("null_business_key_count", F.lit(0)).withColumn("object_name", F.lit("gold_dim_item")).withColumn("object_type", F.lit("MATERIALIZED_VIEW")).withColumn("source_layer", F.lit("mv_from_silver")),
@@ -90,10 +105,12 @@ def dq_gold_dp_metrics():
     result = metrics[0]
     for df in metrics[1:]:
         result = result.unionByName(df)
+    # Adds generic metadata and aligns the metrics with rule catalog entries for the gold layer.
     result = result.withColumn("metric_ts", F.current_timestamp()).withColumn("paradigm", F.lit("declarative"))
     return result.join(dlt.read("dq_rule_catalog").where(F.col("layer") == "gold"), on="object_name", how="inner").select(
         "metric_ts", "paradigm", "object_name", "object_type", "row_count", "issue_count", "negative_value_count", "null_business_key_count", "validation_mode", "source_layer", "rule_id", "rule_group", "rule_expression", "rule_type", "severity", "owner"
     )
+
 
 #catalog
 @dlt.table(
@@ -101,11 +118,14 @@ def dq_gold_dp_metrics():
     comment="Persistierte Gold DQ Issues für UC/BI und Vergleich"
 )
 def dq_gold_dp_issues_pub():
+    # Publishes the observed gold issue view as a persistent table.
     return dlt.read("dq_gold_dp_issues")
+
 
 @dlt.table(
     name="dq_gold_dp_metrics_pub",
     comment="Persistierte Gold DQ Issues für UC/BI und Vergleich"
 )
 def dq_gold_dp_metrics_pub():
+    # Publishes the gold metrics view as a persistent table.
     return dlt.read("dq_gold_dp_metrics")

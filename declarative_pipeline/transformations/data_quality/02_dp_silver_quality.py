@@ -1,13 +1,20 @@
 """
-Declarative Bronze Silver Layer
+Declarative Bronze Silver Layer - Issues and Rule Status.
 
+Materializes residual DQ issues on silver models and derives per-rule
+PASS/FAIL status by evaluating dq_rule_catalog EXPECT rules against
+the declarative silver tables.
 """
+
 
 import dlt
 from pyspark.sql import functions as F
 
 
+
 def catalog_rule(rule_id: str):
+    # Reads exactly one rule definition from the central rule catalog
+    # and enriches it with the paradigm label used in comparisons.
     return (
         dlt.read("dq_rule_catalog")
         .where(F.col("rule_id") == rule_id)
@@ -26,12 +33,18 @@ def catalog_rule(rule_id: str):
     )
 
 
+
 def enrich_with_rule(df, rule_id: str):
+    # Attaches the rule metadata to every observed issue row.
     return df.crossJoin(catalog_rule(rule_id))
+
 
 
 @dlt.view(name="dq_silver_dp_issues", comment="Observed residual issues on declarative silver models derived from unified dq_rule_catalog metadata")
 def dq_silver_dp_issues():
+    # Residual issue view:
+    # These checks document rule violations that are still observable
+    # on the resulting declarative silver models.
     issues_1 = enrich_with_rule(
         dlt.read("silver_date_dim")
         .where(F.col("d_date_sk").isNull() | F.col("d_date").isNull() | F.col("d_year").isNull() | F.col("d_moy").isNull())
@@ -130,9 +143,11 @@ def dq_silver_dp_issues():
         ),
         "DP_SILVER_012",
     )
+    # Unifies all observed issue frames into one standardized issue dataset.
     return issues_1.unionByName(issues_2).unionByName(issues_3).unionByName(issues_4).unionByName(issues_5).unionByName(issues_6).select(
         "observed_at", "paradigm", "object_name", "rule_id", "rule_group", "key_1", "key_2", "key_3", "key_4", "issue_reason"
     )
+
 
 
 @dlt.view(
@@ -140,25 +155,31 @@ def dq_silver_dp_issues():
     comment="Rule status view derived from unified dq_rule_catalog for silver",
 )
 def dq_silver_dp_rule_status():
+    # Builds a per-rule status view for all declarative silver EXPECT rules.
     rules = (
         dlt.read("dq_rule_catalog")
         .where(F.col("layer") == "silver")
         .where(F.col("rule_type") == "EXPECT")
     )
 
+
     outputs = []
+
 
     for row in rules.collect():
         rule_id = row["rule_id"]
         object_name = row["object_name"]
         expr = row["rule_expression"]
 
+        # Evaluates the configured rule expression against the target object.
         df = dlt.read(object_name).where(F.expr(expr))
 
+        # Counts rows matching the rule expression and keeps the result per rule.
         agg = df.agg(F.count(F.lit(1)).alias("violating_rows")).withColumn(
             "rule_id", F.lit(rule_id)
         )
 
+        # Reattaches rule metadata and derives a simple PASS/FAIL status.
         enriched = (
             agg.join(catalog_rule(rule_id), on="rule_id", how="inner")
             .withColumn("observed_at", F.current_timestamp())
@@ -187,17 +208,21 @@ def dq_silver_dp_rule_status():
         "violating_rows",
     )
 
+
 #catalog 
 @dlt.table(
     name="dq_silver_dp_issues_pub",
     comment="Persistierte Silver DQ Issues für UC/BI und Vergleich"
 )
 def dq_silver_dp_issues_pub():
+    # Publishes the observed silver issue view as a persistent table.
     return dlt.read("dq_silver_dp_issues")
+
 
 @dlt.table(
     name="dq_silver_dp_rule_status_pub",
     comment="Persistierte Silver DQ Issues für UC/BI und Vergleich"
 )
 def dq_silver_dp_rule_status_pub():
+    # Publishes the per-rule silver status view as a persistent table.
     return dlt.read("dq_silver_dp_rule_status")

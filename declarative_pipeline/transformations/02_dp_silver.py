@@ -1,20 +1,29 @@
 """
 Declarative Silver Layer
 
+Transforms bronze tables into standardized, de-duplicated and validated
+silver models by applying DLT expectations, type casting, trimming, and
+referential filtering against dimension tables.
 """
+
 
 import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 
+
 def trim_to_null(column_name: str):
+    # Normalizes empty strings to NULL while trimming surrounding whitespace.
     return F.when(F.trim(F.col(column_name)) == "", F.lit(None)).otherwise(F.trim(F.col(column_name)))
 
 
+
 def latest_by_keys(df, keys):
+    # Keeps only the latest record per logical key based on ingestion_timestamp.
     window_spec = Window.partitionBy(*[F.col(k) for k in keys]).orderBy(F.col("ingestion_timestamp").desc())
     return df.withColumn("rn", F.row_number().over(window_spec)).where(F.col("rn") == 1).drop("rn")
+
 
 
 @dlt.table(name="silver_date_dim", comment="Silver layer - standardized and validated date dimension (declarative)")
@@ -28,6 +37,7 @@ def latest_by_keys(df, keys):
 @dlt.expect("valid_holiday_flag", "d_holiday IN ('Y', 'N')")
 @dlt.expect("valid_weekend_flag", "d_weekend IN ('Y', 'N')")
 def silver_date_dim():
+    # Type-casts and derives standardized date attributes, then keeps the latest record per d_date_sk.
     staged = (
         dlt.read("bronze_date_dim")
         .select(
@@ -68,6 +78,7 @@ def silver_date_dim():
     return latest_by_keys(staged, ["d_date_sk"])
 
 
+
 @dlt.table(name="silver_item", comment="Silver layer - standardized and validated item dimension (declarative)")
 @dlt.expect_or_drop("DP_SILVER_005", "i_item_sk IS NOT NULL")
 @dlt.expect_or_drop("pk_item_sk_positive", "i_item_sk > 0")
@@ -76,6 +87,7 @@ def silver_date_dim():
 @dlt.expect_or_drop("nn_item_id", "i_item_id IS NOT NULL")
 @dlt.expect("valid_date_range", "i_rec_end_date IS NULL OR i_rec_end_date >= i_rec_start_date")
 def silver_item():
+    # Cleans string attributes, enforces price rules, and resolves latest version per item key.
     staged = (
         dlt.read("bronze_item")
         .select(
@@ -108,6 +120,7 @@ def silver_item():
     return latest_by_keys(staged, ["i_item_sk"])
 
 
+
 @dlt.table(name="silver_store", comment="Silver layer - standardized and validated store dimension (declarative)")
 @dlt.expect_or_drop("DP_SILVER_008", "s_store_sk IS NOT NULL")
 @dlt.expect_or_drop("pk_store_sk_positive", "s_store_sk > 0")
@@ -118,6 +131,7 @@ def silver_item():
 @dlt.expect("valid_gmt_offset", "s_gmt_offset BETWEEN -12 AND 14 OR s_gmt_offset IS NULL")
 @dlt.expect("valid_date_range", "s_rec_end_date IS NULL OR s_rec_end_date >= s_rec_start_date")
 def silver_store():
+    # Standardizes store attributes and applies basic sanity checks before keeping the latest version per store.
     staged = (
         dlt.read("bronze_store")
         .select(
@@ -157,6 +171,7 @@ def silver_store():
     return latest_by_keys(staged, ["s_store_sk"])
 
 
+
 @dlt.table(name="silver_customer", comment="Silver layer - standardized and validated customer dimension (declarative)")
 @dlt.expect_or_drop("DP_SILVER_009", "c_customer_sk IS NOT NULL")
 @dlt.expect_or_drop("pk_customer_sk_positive", "c_customer_sk > 0")
@@ -165,6 +180,7 @@ def silver_store():
 @dlt.expect_or_drop("valid_birth_month", "c_birth_month BETWEEN 1 AND 12 OR c_birth_month IS NULL")
 @dlt.expect_or_drop("valid_birth_day", "c_birth_day BETWEEN 1 AND 31 OR c_birth_day IS NULL")
 def silver_customer():
+    # Cleans customer attributes and enforces basic key and birth-date validity before deduplication.
     staged = (
         dlt.read("bronze_customer")
         .select(
@@ -194,6 +210,7 @@ def silver_customer():
     return latest_by_keys(staged, ["c_customer_sk"])
 
 
+
 @dlt.table(name="silver_store_sales", comment="Silver layer - standardized, deduplicated and referentially filtered store sales fact (declarative)")
 @dlt.expect_or_drop("DP_SILVER_010", "ss_ticket_number IS NOT NULL")
 @dlt.expect_or_drop("DP_SILVER_010_b", "ss_item_sk IS NOT NULL")
@@ -205,6 +222,7 @@ def silver_customer():
 @dlt.expect_or_drop("non_negative_net_paid", "ss_net_paid >= 0 OR ss_net_paid IS NULL")
 @dlt.expect_or_drop("sales_price_reasonable", "ss_sales_price <= ss_list_price * 1.5 OR ss_sales_price IS NULL OR ss_list_price IS NULL")
 def silver_store_sales():
+    # Standardizes fact schema, resolves latest records, and filters to rows with valid dimensional references.
     staged = (
         dlt.read("bronze_store_sales")
         .select(
@@ -236,6 +254,7 @@ def silver_store_sales():
         )
     )
 
+    # Deduplicate by ticket + item, then enforce referential integrity against silver dimensions.
     latest_only = latest_by_keys(staged, ["ss_ticket_number", "ss_item_sk"])
     d = dlt.read("silver_date_dim").select(F.col("d_date_sk"))
     i = dlt.read("silver_item").select(F.col("i_item_sk"))
@@ -248,6 +267,8 @@ def silver_store_sales():
         .join(i.alias("i"), F.col("l.ss_item_sk") == F.col("i.i_item_sk"), "left")
         .join(s.alias("s"), F.col("l.ss_store_sk") == F.col("s.s_store_sk"), "left")
         .join(c.alias("c"), F.col("l.ss_customer_sk") == F.col("c.c_customer_sk"), "left")
+        # Allow NULL date/store/customer keys only if there is no corresponding dimension row,
+        # while requiring a valid item reference for all facts.
         .where((F.col("l.ss_sold_date_sk").isNull()) | (F.col("d.d_date_sk").isNotNull()))
         .where(F.col("i.i_item_sk").isNotNull())
         .where((F.col("l.ss_store_sk").isNull()) | (F.col("s.s_store_sk").isNotNull()))

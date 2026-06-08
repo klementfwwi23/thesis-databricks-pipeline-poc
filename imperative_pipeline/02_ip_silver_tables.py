@@ -1,44 +1,69 @@
 """
-Imperative Silver Layer - pure PySpark implementation
+Imperative Silver Layer - pure PySpark implementation.
 
+Transforms bronze TPC-DS tables into cleansed, conformed silver tables using
+explicit typing, trimming, null handling, and basic data-quality filters.
 """
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 
+# Target Unity Catalog location for all silver tables written by this job.
 CATALOG = "workspace"
 SCHEMA = "imperative"
 
 
 def get_spark() -> SparkSession:
+    """Return the active Spark session or create one if none exists."""
     return SparkSession.builder.getOrCreate()
 
 
 def fq_table(table_name: str) -> str:
+    """Build the fully qualified table name within the configured catalog/schema."""
     return f"{CATALOG}.{SCHEMA}.{table_name}"
 
 
 def write_delta_table(df: DataFrame, table_name: str) -> None:
+    """Write a DataFrame as a managed Delta table, replacing any existing definition."""
     (
         df.write.format("delta")
         .mode("overwrite")
+        # Allow schema evolution when the transformation changes the table layout.
         .option("overwriteSchema", "true")
         .saveAsTable(fq_table(table_name))
     )
 
 
 def trim_null(col_name: str):
+    """
+    Trim whitespace from a string column and normalize empty strings to null.
+
+    This avoids treating "" as a meaningful value in downstream joins and filters.
+    """
     trimmed = F.trim(F.col(col_name))
     return F.when(trimmed == "", F.lit(None)).otherwise(trimmed)
 
 
 def latest_by(df: DataFrame, partition_cols: list[str]) -> DataFrame:
-    window = Window.partitionBy(*partition_cols).orderBy(F.col("ingestion_timestamp").desc())
-    return df.withColumn("rn", F.row_number().over(window)).filter(F.col("rn") == 1).drop("rn")
+    """
+    Keep only the latest record per natural key based on ingestion_timestamp.
+
+    This expects an ingestion_timestamp column injected in the bronze layer and
+    implements a typical "latest version per key" pattern for slowly changing data.
+    """
+    window = Window.partitionBy(*partition_cols).orderBy(
+        F.col("ingestion_timestamp").desc()
+    )
+    return (
+        df.withColumn("rn", F.row_number().over(window))
+        .filter(F.col("rn") == 1)
+        .drop("rn")
+    )
 
 
 def build_silver_date_dim() -> DataFrame:
+    """Build the conformed date dimension with typed fields and validity checks."""
     staged = spark.table(fq_table("bronze_date_dim")).select(
         F.col("d_date_sk").cast("int").alias("d_date_sk"),
         "d_date_id",
@@ -68,12 +93,21 @@ def build_silver_date_dim() -> DataFrame:
         "d_current_month",
         "d_current_quarter",
         "d_current_year",
-        F.concat(F.col("d_year").cast("string"), F.lit("-"), F.lpad(F.col("d_moy").cast("string"), 2, "0")).alias("year_month"),
-        F.when(F.col("d_weekend") == "Y", F.lit(True)).otherwise(F.lit(False)).alias("is_weekend"),
+        # Derived year-month key in YYYY-MM format for common aggregations.
+        F.concat(
+            F.col("d_year").cast("string"),
+            F.lit("-"),
+            F.lpad(F.col("d_moy").cast("string"), 2, "0"),
+        ).alias("year_month"),
+        # Normalize weekend flag to boolean.
+        F.when(F.col("d_weekend") == "Y", F.lit(True))
+        .otherwise(F.lit(False))
+        .alias("is_weekend"),
         "ingestion_timestamp",
         "source_table",
     )
 
+    # Keep only valid calendar dates and discard obviously broken records.
     return latest_by(staged, ["d_date_sk"]).filter(
         (F.col("d_date_sk").isNotNull())
         & (F.col("d_date_sk") > 0)
@@ -89,14 +123,15 @@ def build_silver_date_dim() -> DataFrame:
 
 
 def build_silver_item() -> DataFrame:
+    """Build the item dimension with normalized text and non-negative pricing."""
     staged = spark.table(fq_table("bronze_item")).select(
         F.col("i_item_sk").cast("int").alias("i_item_sk"),
         trim_null("i_item_id").alias("i_item_id"),
         F.col("i_rec_start_date").cast("date").alias("i_rec_start_date"),
         F.col("i_rec_end_date").cast("date").alias("i_rec_end_date"),
         trim_null("i_item_desc").alias("i_item_desc"),
-        F.col("i_current_price").cast("decimal(7,2)").alias("i_current_price"),
-        F.col("i_wholesale_cost").cast("decimal(7,2)").alias("i_wholesale_cost"),
+        F.col("i_current_price").cast("decimal(7, 2)").alias("i_current_price"),
+        F.col("i_wholesale_cost").cast("decimal(7, 2)").alias("i_wholesale_cost"),
         F.col("i_brand_id").cast("int").alias("i_brand_id"),
         trim_null("i_brand").alias("i_brand"),
         F.col("i_class_id").cast("int").alias("i_class_id"),
@@ -116,6 +151,7 @@ def build_silver_item() -> DataFrame:
         "source_table",
     )
 
+    # Enforce key presence and reasonable price constraints; allow null wholesale cost.
     return latest_by(staged, ["i_item_sk"]).filter(
         (F.col("i_item_sk").isNotNull())
         & (F.col("i_item_sk") > 0)
@@ -127,6 +163,7 @@ def build_silver_item() -> DataFrame:
 
 
 def build_silver_store() -> DataFrame:
+    """Build the store dimension with cleaned address attributes and non-negative metrics."""
     staged = spark.table(fq_table("bronze_store")).select(
         F.col("s_store_sk").cast("int").alias("s_store_sk"),
         trim_null("s_store_id").alias("s_store_id"),
@@ -155,12 +192,13 @@ def build_silver_store() -> DataFrame:
         trim_null("s_state").alias("s_state"),
         trim_null("s_zip").alias("s_zip"),
         trim_null("s_country").alias("s_country"),
-        F.col("s_gmt_offset").cast("decimal(5,2)").alias("s_gmt_offset"),
-        F.col("s_tax_precentage").cast("decimal(5,2)").alias("s_tax_precentage"),
+        F.col("s_gmt_offset").cast("decimal(5, 2)").alias("s_gmt_offset"),
+        F.col("s_tax_precentage").cast("decimal(5, 2)").alias("s_tax_precentage"),
         "ingestion_timestamp",
         "source_table",
     )
 
+    # Ensure key and basic descriptive fields are present; keep non-negative numeric metrics.
     return latest_by(staged, ["s_store_sk"]).filter(
         (F.col("s_store_sk").isNotNull())
         & (F.col("s_store_sk") > 0)
@@ -172,6 +210,7 @@ def build_silver_store() -> DataFrame:
 
 
 def build_silver_customer() -> DataFrame:
+    """Build the customer dimension with normalized personal data and soft DOB checks."""
     staged = spark.table(fq_table("bronze_customer")).select(
         F.col("c_customer_sk").cast("int").alias("c_customer_sk"),
         trim_null("c_customer_id").alias("c_customer_id"),
@@ -196,6 +235,7 @@ def build_silver_customer() -> DataFrame:
         "source_table",
     )
 
+    # Enforce key and ID presence; apply reasonable ranges for birth date attributes.
     return latest_by(staged, ["c_customer_sk"]).filter(
         (F.col("c_customer_sk").isNotNull())
         & (F.col("c_customer_sk") > 0)
@@ -207,6 +247,12 @@ def build_silver_customer() -> DataFrame:
 
 
 def build_silver_store_sales() -> DataFrame:
+    """
+    Build the store_sales fact table with enforced referential integrity.
+
+    The transformation keeps only latest records per (ticket, item) and filters
+    out rows that violate dimension foreign-key constraints or basic numeric rules.
+    """
     staged = spark.table(fq_table("bronze_store_sales")).select(
         F.col("ss_sold_date_sk").cast("int").alias("ss_sold_date_sk"),
         F.col("ss_sold_time_sk").cast("int").alias("ss_sold_time_sk"),
@@ -219,28 +265,35 @@ def build_silver_store_sales() -> DataFrame:
         F.col("ss_promo_sk").cast("int").alias("ss_promo_sk"),
         F.col("ss_ticket_number").cast("bigint").alias("ss_ticket_number"),
         F.col("ss_quantity").cast("int").alias("ss_quantity"),
-        F.col("ss_wholesale_cost").cast("decimal(7,2)").alias("ss_wholesale_cost"),
-        F.col("ss_list_price").cast("decimal(7,2)").alias("ss_list_price"),
-        F.col("ss_sales_price").cast("decimal(7,2)").alias("ss_sales_price"),
-        F.col("ss_ext_discount_amt").cast("decimal(7,2)").alias("ss_ext_discount_amt"),
-        F.col("ss_ext_sales_price").cast("decimal(7,2)").alias("ss_ext_sales_price"),
-        F.col("ss_ext_wholesale_cost").cast("decimal(7,2)").alias("ss_ext_wholesale_cost"),
-        F.col("ss_ext_list_price").cast("decimal(7,2)").alias("ss_ext_list_price"),
-        F.col("ss_ext_tax").cast("decimal(7,2)").alias("ss_ext_tax"),
-        F.col("ss_coupon_amt").cast("decimal(7,2)").alias("ss_coupon_amt"),
-        F.col("ss_net_paid").cast("decimal(7,2)").alias("ss_net_paid"),
-        F.col("ss_net_paid_inc_tax").cast("decimal(7,2)").alias("ss_net_paid_inc_tax"),
-        F.col("ss_net_profit").cast("decimal(7,2)").alias("ss_net_profit"),
+        F.col("ss_wholesale_cost").cast("decimal(7, 2)").alias("ss_wholesale_cost"),
+        F.col("ss_list_price").cast("decimal(7, 2)").alias("ss_list_price"),
+        F.col("ss_sales_price").cast("decimal(7, 2)").alias("ss_sales_price"),
+        F.col("ss_ext_discount_amt").cast("decimal(7, 2)").alias("ss_ext_discount_amt"),
+        F.col("ss_ext_sales_price").cast("decimal(7, 2)").alias("ss_ext_sales_price"),
+        F.col("ss_ext_wholesale_cost").cast("decimal(7, 2)").alias("ss_ext_wholesale_cost"),
+        F.col("ss_ext_list_price").cast("decimal(7, 2)").alias("ss_ext_list_price"),
+        F.col("ss_ext_tax").cast("decimal(7, 2)").alias("ss_ext_tax"),
+        F.col("ss_coupon_amt").cast("decimal(7, 2)").alias("ss_coupon_amt"),
+        F.col("ss_net_paid").cast("decimal(7, 2)").alias("ss_net_paid"),
+        F.col("ss_net_paid_inc_tax").cast("decimal(7, 2)").alias("ss_net_paid_inc_tax"),
+        F.col("ss_net_profit").cast("decimal(7, 2)").alias("ss_net_profit"),
         "ingestion_timestamp",
         "source_table",
     )
 
+    # De-duplicate to the latest version per (ticket, item) combination.
     latest = latest_by(staged, ["ss_ticket_number", "ss_item_sk"]).alias("l")
+
+    # Load only the surrogate keys needed for foreign-key checks from each dimension.
     date_dim = spark.table(fq_table("silver_date_dim")).select("d_date_sk").alias("d")
     item = spark.table(fq_table("silver_item")).select("i_item_sk").alias("i")
     store = spark.table(fq_table("silver_store")).select("s_store_sk").alias("s")
     customer = spark.table(fq_table("silver_customer")).select("c_customer_sk").alias("c")
 
+    # Enforce referential integrity rules:
+    # - sold_date_sk may be null but must exist in date_dim if present
+    # - item foreign key is mandatory
+    # - store and customer foreign keys are optional but must exist if present
     valid_fk = (
         latest.join(date_dim, F.col("l.ss_sold_date_sk") == F.col("d.d_date_sk"), "left")
         .join(item, F.col("l.ss_item_sk") == F.col("i.i_item_sk"), "left")
@@ -255,6 +308,8 @@ def build_silver_store_sales() -> DataFrame:
         .select("l.*")
     )
 
+    # Final fact-level quality checks: enforce mandatory keys, positive quantities,
+    # and non-negative monetary amounts (with nulls allowed where appropriate).
     return valid_fk.filter(
         (F.col("ss_ticket_number").isNotNull())
         & (F.col("ss_item_sk").isNotNull())
@@ -268,6 +323,8 @@ def build_silver_store_sales() -> DataFrame:
 
 
 def main() -> None:
+    """Build and persist all silver tables defined in this module."""
+    # Map target table names to their corresponding builder functions.
     table_builders = [
         ("silver_date_dim", build_silver_date_dim),
         ("silver_item", build_silver_item),
@@ -279,10 +336,13 @@ def main() -> None:
     for table_name, builder in table_builders:
         df = builder()
         write_delta_table(df, table_name)
-        print(f"Wrote {fq_table(table_name)}: {spark.table(fq_table(table_name)).count()} rows")
+        row_count = spark.table(fq_table(table_name)).count()
+        print(f"Wrote {fq_table(table_name)}: {row_count} rows")
 
 
+# Create the Spark session once at module level so all builders can reuse it.
 spark = get_spark()
+
 
 if __name__ == "__main__":
     main()
