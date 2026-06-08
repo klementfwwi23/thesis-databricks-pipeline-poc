@@ -255,6 +255,6 @@ Location: Heidenheim, Germany
 
 ---
 
-**Last Updated**: May 22, 2026  
+**Last Updated**: June 8, 2026  
 **Status**: writing (Thesis Submitted & Repository Archived)  
-**Version**: v1.0-final
+**Version**: v2.0-final
