@@ -9,7 +9,7 @@ This repository contains the **Proof of Concept (PoC) implementation** for the B
 > **"Evaluation of Declarative Lakeflow Spark Pipelines Compared to Imperative ELT Scripts in Batch-Oriented Medallion Architectures"**  
 > Author: Franziska Klement  
 > Institution: DHBW Heidenheim  
-> Submission: May 2026
+> Submission: June 2026
 
 ## Overview
 
