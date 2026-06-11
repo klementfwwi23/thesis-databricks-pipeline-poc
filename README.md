@@ -2,7 +2,6 @@
 
 [![License](https://img.shields.io/badge/License-Academic%20Use-blue.svg)](LICENSE)
 [![Databricks](https://img.shields.io/badge/Databricks-DLT%20%7C%20PySpark-orange.svg)](https://databricks.com)
-[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 
 This repository contains the **Proof of Concept (PoC) implementation** for the Bachelor thesis:
 
