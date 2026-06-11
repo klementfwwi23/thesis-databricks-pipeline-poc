@@ -232,8 +232,6 @@ Copyright © 2026 Franziska Klement
 
 Redistribution, modification, and commercial use are prohibited without explicit written permission from the author. This code is part of a Bachelor thesis submitted to DHBW Heidenheim and is subject to academic integrity policies.
 
-See [LICENSE](LICENSE) file for full terms.
-
 ---
 
 ## Author
